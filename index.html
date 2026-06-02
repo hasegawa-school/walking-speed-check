@@ -3,72 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>廊下安全歩行チェッカー (プランA)</title>
+    <title>廊下安全歩行チェッカー (複数人対応版)</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
     <style>
-        body {
-            font-family: 'Helvetica Neue', Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f0f2f5;
-            text-align: center;
-        }
-        h1 { color: #333; margin-bottom: 5px; }
-        #container {
-            position: relative;
-            margin: 20px auto;
-            width: 640px;
-            height: 480px;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        video, canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 640px;
-            height: 480px;
-        }
-        /* 走破判定時の画面フラッシュ用 */
-        #overlay {
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background-color: rgba(255, 0, 0, 0.6);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            color: white;
-            font-size: 48px;
-            font-weight: bold;
-            opacity: 0;
-            transition: opacity 0.1s ease-out;
-            pointer-events: none;
-            z-index: 10;
-        }
-        #status-box {
-            margin: 20px auto;
-            width: 640px;
-            padding: 15px;
-            background: white;
-            border-radius: 8px;
-            font-size: 18px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        .param-control {
-            margin: 10px;
-        }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f2f5; text-align: center; }
+        #container { position: relative; margin: 20px auto; width: 640px; height: 480px; box-shadow: 0 4px 10px rgba(0,0,0,0.2); border-radius: 8px; overflow: hidden; }
+        video, canvas { position: absolute; top: 0; left: 0; width: 640px; height: 480px; }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(255, 0, 0, 0.6); display: flex; justify-content: center; align-items: center; color: white; font-size: 48px; font-weight: bold; opacity: 0; transition: opacity 0.1s; pointer-events: none; z-index: 10; }
+        #status-box { margin: 20px auto; width: 640px; padding: 15px; background: white; border-radius: 8px; font-size: 18px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); height: 100px; overflow-y: auto; text-align: left; }
+        .param-control { margin: 10px; }
     </style>
 </head>
 <body>
 
-    <h1>🏃‍♂️ 廊下安全歩行チェッカー 🚶‍♂️</h1>
-    <p>横から撮影してください。画面の左から右（または右から左）へ移動する速度を測ります。</p>
-
+    <h1>🏃‍♂️ 廊下安全歩行チェッカー (複数人同時検知) 🚶‍♂️</h1>
     <div class="param-control">
-        <label for="threshold-input">⏱ 危険と判定する秒数（これより速いと警告）：</label>
-        <input type="number" id="threshold-input" value="1.2" step="0.1" min="0.5" style="width: 60px; font-size: 16px;"> 秒
+        <label for="threshold-input">⏱ 危険判定秒数：</label>
+        <input type="number" id="threshold-input" value="1.2" step="0.1" min="0.5" style="width: 60px;"> 秒
     </div>
 
     <div id="container">
@@ -78,7 +30,7 @@
     </div>
 
     <div id="status-box">
-        <div id="info">AI起動中... カメラを許可してください。</div>
+        <div id="info">AI起動中...</div>
     </div>
 
     <script>
@@ -91,161 +43,165 @@
 
         let detector;
         let startX, endX;
-        let trackingTarget = null; // 現在計測中のデータ { startTime: ms, direction: 'L2R'|'R2L' }
+        
+        // 追跡中のユーザーたちを記憶する配列
+        let trackedUsers = []; 
+        let nextUserId = 1;
 
-        // ブラウザのオーディオ機能を使って警告音（ブザー）を鳴らす関数
         function playAlertSound() {
             const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const oscillator = audioCtx.createOscillator();
             const gainNode = audioCtx.createGain();
-            
-            oscillator.type = 'sawtooth'; // 警告音っぽいノコギリ波
-            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // 音の高さ (A5)
-            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime); // 音量
-            
+            oscillator.type = 'sawtooth';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
             oscillator.connect(gainNode);
             gainNode.connect(audioCtx.destination);
-            
             oscillator.start();
-            // プププと3回鳴らす
             setTimeout(() => { oscillator.stop(); }, 400);
         }
 
-        // 警告演出（画面フラッシュ＋音）
-        function triggerWarning(elapsedTime) {
-            playAlertSound();
-            overlay.style.opacity = '1';
-            info.innerHTML = `<span style="color:red; font-weight:bold;">【警告】走りました！ 記録: ${elapsedTime.toFixed(2)} 秒 (危険)</span>`;
-            
-            setTimeout(() => {
-                overlay.style.opacity = '0';
-            }, 1500);
+        function logResult(message, isWarning) {
+            const color = isWarning ? 'red' : 'green';
+            const weight = isWarning ? 'bold' : 'normal';
+            const newLog = `<div style="color:${color}; font-weight:${weight};">${message}</div>`;
+            info.innerHTML = newLog + info.innerHTML; // 最新のログを上に
         }
 
-        // 安全に歩いたときの演出
-        function triggerSafe(elapsedTime) {
-            info.innerHTML = `<span style="color:green; font-weight:bold;">【ナイス】安全に歩けました！ 記録: ${elapsedTime.toFixed(2)} 秒 (安全)</span>`;
-        }
-
-        // メインシステム起動
         async function setupApp() {
-            // 1. カメラのセットアップ
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 640, height: 480 },
-                audio: false
-            });
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
             video.srcObject = stream;
-            
             await new Promise((resolve) => { video.onloadedmetadata = () => resolve(video); });
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
 
-            // 境界線の定義 (画面の左から30%と70%の位置)
             startX = canvas.width * 0.3;
             endX = canvas.width * 0.7;
 
-            info.innerText = "AIモデルを読み込み中...";
-
-            // 2. MoveNetモデルの読み込み
+            // マルチポーズ(MULTIPOSE)モデルでデテクタを作成
             detector = await poseDetection.createDetector(
                 poseDetection.SupportedModels.MoveNet,
-                { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+                { modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING }
             );
 
-            info.innerText = "🟢 システム作動中！廊下を監視しています...";
+            info.innerText = "🟢 マルチスキャン作動中！全員を監視しています...";
             detectPose();
         }
 
-        // 毎フレームのループ処理
         async function detectPose() {
             const poses = await detector.estimatePoses(video);
-            
-            // キャンバスのクリア
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // 計測エリアの境界線を描画
-            ctx.strokeStyle = '#007bff';
-            ctx.lineWidth = 3;
-            ctx.setLineDash([6, 6]);
-            // スタート線
+            // 境界線の描画
+            ctx.strokeStyle = '#007bff'; ctx.lineWidth = 3; ctx.setLineDash([6, 6]);
             ctx.beginPath(); ctx.moveTo(startX, 0); ctx.lineTo(startX, canvas.height); ctx.stroke();
-            // ゴール線
             ctx.beginPath(); ctx.moveTo(endX, 0); ctx.lineTo(endX, canvas.height); ctx.stroke();
 
-            // 線のラベル描画
-            ctx.fillStyle = '#007bff';
-            ctx.font = '16px Arial';
-            ctx.fillText('計測線 A', startX - 70, 30);
-            ctx.fillText('計測線 B', endX + 10, 30);
+            const now = performance.now();
+            const limitSeconds = parseFloat(thresholdInput.value);
+            let currentFrameNoses = [];
 
-            if (poses.length > 0) {
-                // 最も確実な「鼻(Nose)」の座標を取得
-                const nose = poses[0].keypoints.find(kp => kp.name === 'nose');
+            // 1. 今回のフレームで見つかった「信頼度の高い鼻」をリストアップ
+            poses.forEach(pose => {
+                const nose = pose.keypoints.find(kp => kp.name === 'nose');
+                if (nose && nose.score > 0.3) {
+                    currentFrameNoses.push({ x: nose.x, y: nose.y });
+                }
+            });
 
-                if (nose && nose.score > 0.4) {
-                    const cx = nose.x;
-                    const cy = nose.y;
+            // 2. 既存の追跡データと、新しい鼻の位置をマッチング（簡易トラッキング）
+            let updatedUsers = [];
 
-                    // 画面に検知中のマーカー（赤い丸）を描画
-                    ctx.fillStyle = '#ffc107';
-                    ctx.beginPath();
-                    ctx.arc(cx, cy, 10, 0, 2 * Math.PI);
-                    ctx.fill();
+            currentFrameNoses.forEach(nose => {
+                // 一番距離が近い、前フレームのユーザーを探す（30ピクセル以内なら同一人物とみなす）
+                let matchedUser = null;
+                let minDistance = 50; 
 
-                    const now = performance.now();
-                    const limitSeconds = parseFloat(thresholdInput.value);
+                trackedUsers.forEach(user => {
+                    const dist = Math.hypot(user.lastX - nose.x, user.lastY - nose.y);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        matchedUser = user;
+                    }
+                });
 
-                    // --- 速度計測ロジック ---
-                    
-                    // パターン①: 左から右への移動
-                    if (!trackingTarget && cx > startX && cx < startX + 40) {
-                        // 計測線Aを左からまたいだ瞬間
-                        trackingTarget = { startTime: now, direction: 'L2R' };
-                    } 
-                    else if (trackingTarget && trackingTarget.direction === 'L2R' && cx > endX) {
-                        // 計測線Bを右に抜けた瞬間（ゴール）
-                        const elapsed = (now - trackingTarget.startTime) / 1000; // 秒に変換
+                if (matchedUser) {
+                    // 同一人物のデータを更新
+                    matchedUser.lastX = nose.x;
+                    matchedUser.lastY = nose.y;
+                    matchedUser.lastTime = now;
+
+                    // ゴール判定 (左から右)
+                    if (matchedUser.direction === 'L2R' && nose.x > endX && !matchedUser.isFinished) {
+                        const elapsed = (now - matchedUser.startTime) / 1000;
+                        matchedUser.isFinished = true;
                         if (elapsed < limitSeconds) {
-                            triggerWarning(elapsed);
+                            playAlertSound();
+                            overlay.style.opacity = '1';
+                            setTimeout(() => { overlay.style.opacity = '0'; }, 1000);
+                            logResult(`⚠️ 判定[ID:${matchedUser.id}]: 走りました！ (${elapsed.toFixed(2)}秒)`, true);
                         } else {
-                            triggerSafe(elapsed);
+                            logResult(`🚶‍♂️ 判定[ID:${matchedUser.id}]: 安全歩行です。 (${elapsed.toFixed(2)}秒)`, false);
                         }
-                        trackingTarget = null; // リセット
+                    }
+                    // ゴール判定 (右から左)
+                    else if (matchedUser.direction === 'R2L' && nose.x < startX && !matchedUser.isFinished) {
+                        const elapsed = (now - matchedUser.startTime) / 1000;
+                        matchedUser.isFinished = true;
+                        if (elapsed < limitSeconds) {
+                            playAlertSound();
+                            overlay.style.opacity = '1';
+                            setTimeout(() => { overlay.style.opacity = '0'; }, 1000);
+                            logResult(`⚠️ 判定[ID:${matchedUser.id}]: 走りました！ (${elapsed.toFixed(2)}秒)`, true);
+                        } else {
+                            logResult(`🚶‍♂️ 判定[ID:${matchedUser.id}]: 安全歩行です。 (${elapsed.toFixed(2)}秒)`, false);
+                        }
                     }
 
-                    // パターン②: 右から左への移動
-                    if (!trackingTarget && cx < endX && cx > endX - 40) {
-                        // 計測線Bを右からまたいだ瞬間
-                        trackingTarget = { startTime: now, direction: 'R2L' };
-                    } 
-                    else if (trackingTarget && trackingTarget.direction === 'R2L' && cx < startX) {
-                        // 計測線Aを左に抜けた瞬間（ゴール）
-                        const elapsed = (now - trackingTarget.startTime) / 1000;
-                        if (elapsed < limitSeconds) {
-                            triggerWarning(elapsed);
-                        } else {
-                            triggerSafe(elapsed);
-                        }
-                        trackingTarget = null; // リセット
-                    }
+                    updatedUsers.push(matchedUser);
+                    // マッチしたものはリストから一時除外（重複防止）
+                    trackedUsers = trackedUsers.filter(u => u.id !== matchedUser.id);
+                } else {
+                    // 新しい人が入ってきた場合の処理（スタート線付近のみで新規登録）
+                    let direction = null;
+                    if (nose.x > startX && nose.x < startX + 50) direction = 'L2R';
+                    if (nose.x < endX && nose.x > endX - 50) direction = 'R2L';
 
-                    // タイムアウト処理（途中で立ち止まったり引き返したらリセット）
-                    if (trackingTarget && (now - trackingTarget.startTime) / 1000 > 5) {
-                        trackingTarget = null;
-                        info.innerText = "🟢 計測タイムアウト。再監視中...";
+                    if (direction) {
+                        const newUser = {
+                            id: nextUserId++,
+                            startTime: now,
+                            lastX: nose.x,
+                            lastY: nose.y,
+                            lastTime: now,
+                            direction: direction,
+                            isFinished: false
+                        };
+                        updatedUsers.push(newUser);
                     }
                 }
-            }
 
-            // 次のフレームを要求
+                // 画面にIDとマーカーを描画
+                const displayId = matchedUser ? matchedUser.id : (nextUserId - 1);
+                ctx.fillStyle = '#ffc107';
+                ctx.beginPath(); ctx.arc(nose.x, nose.y, 8, 0, 2 * Math.PI); ctx.fill();
+                ctx.fillStyle = '#000'; ctx.font = '14px Arial';
+                ctx.fillText(`ID:${displayId}`, nose.x - 15, nose.y - 15);
+            });
+
+            // 3. 画面から消えた人（タイムアウト）や、まだ画面内にいる人を整理して次回へ引き継ぐ
+            trackedUsers.forEach(user => {
+                // 3秒以上動きがない、またはゴール済みの古いデータは破棄
+                if (now - user.lastTime < 3000 && !user.isFinished) {
+                    updatedUsers.push(user);
+                }
+            });
+
+            trackedUsers = updatedUsers;
             requestAnimationFrame(detectPose);
         }
 
-        // アプリ起動
-        setupApp().catch(err => {
-            console.error(err);
-            info.innerHTML = "<span style='color:red;'>エラー: カメラの起動またはAIの初期化に失敗しました。</span>";
-        });
+        setupApp().catch(err => { console.error(err); info.innerHTML = "<span style='color:red;'>起動エラー</span>"; });
     </script>
 </body>
 </html>
